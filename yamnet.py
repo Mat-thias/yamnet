@@ -100,7 +100,7 @@ def yamnet(features, params):
   for (i, (layer_fun, kernel, stride, filters)) in enumerate(_YAMNET_LAYER_DEFS):
     net = layer_fun('layer{}'.format(i + 1), kernel, stride, filters, params)(net)
   embeddings = layers.GlobalAveragePooling2D()(net)
-  logits = layers.Dense(units=params.num_classes, use_bias=True)(embeddings)
+  logits = layers.Dense(name="dense", units=params.num_classes, use_bias=True)(embeddings)
   predictions = layers.Activation(activation=params.classifier_activation)(logits)
   return predictions, embeddings
 
