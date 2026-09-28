@@ -35,8 +35,8 @@ assert tf.version.VERSION >= '2.0.0', (
 import tensorflow_hub as tfhub
 from tensorflowjs.converters import tf_saved_model_conversion_v2 as tfjs_saved_model_converter
 
-import params as yamnet_params
-import yamnet
+import tensorflow.params as yamnet_params
+import tensorflow.yamnet as yamnet
 
 
 def log(msg):
