@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Power Map</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --panel: #ffffff; --text: #1d1d1b; --muted: #6b6a66; --line: #e3e1db;
+    --on: #e8a317; --on-glow: #f5c95c; --off: #4a5060; --unknown: #a3a29d;
+    --alarm: #d9622b; --gen: #3f7cbf; --track: #ecebe6;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #151515; --panel: #1e1e1e; --text: #ecebe7; --muted: #9a9993; --line: #2e2e2c;
+      --on: #f2b632; --on-glow: #f7cf6e; --off: #7a8296; --unknown: #6e6d69;
+      --alarm: #ec7a45; --gen: #5b98d6; --track: #2a2a28;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 16px/1.45 system-ui, sans-serif; }
+  main { max-width: 560px; margin: 0 auto; padding: 32px 16px; }
+  h1 { font-size: 15px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: var(--muted); margin: 0 0 20px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 24px; margin-bottom: 16px; }
+
+  .light { display: flex; align-items: center; gap: 20px; }
+  .bulb { width: 72px; height: 72px; border-radius: 50%; background: var(--unknown); flex: none; transition: background .3s, box-shadow .3s; }
+  .on .bulb { background: var(--on); box-shadow: 0 0 0 6px color-mix(in srgb, var(--on-glow) 35%, transparent), 0 0 40px var(--on-glow); }
+  .off .bulb { background: var(--off); }
+  .state { font-size: 30px; font-weight: 700; line-height: 1.1; }
+  .detail { color: var(--muted); font-size: 14px; margin-top: 4px; }
+
+  button { font: inherit; font-weight: 600; padding: 10px 18px; border-radius: 10px; border: 1px solid var(--line); background: var(--text); color: var(--panel); cursor: pointer; }
+  button:disabled { opacity: .5; cursor: default; }
+  .controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+  .status { color: var(--muted); font-size: 14px; }
+
+  .meter { display: grid; grid-template-columns: 76px 1fr 44px; align-items: center; gap: 10px; margin: 10px 0; font-size: 14px; }
+  .track { position: relative; height: 12px; background: var(--track); border-radius: 6px; overflow: hidden; }
+  .fill { height: 100%; width: 0; border-radius: 6px; transition: width .2s; }
+  .alarm .fill { background: var(--alarm); } .gen .fill { background: var(--gen); }
+  .mark { position: absolute; top: -2px; bottom: -2px; width: 2px; background: var(--text); opacity: .55; }
+  .value { text-align: right; font-variant-numeric: tabular-nums; }
+  .hint { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .active { font-weight: 700; }
+
+  h2 { font-size: 14px; font-weight: 600; margin: 0 0 10px; }
+  ol { list-style: none; margin: 0; padding: 0; font-size: 14px; }
+  li { display: flex; gap: 12px; padding: 6px 0; border-top: 1px solid var(--line); }
+  li:first-child { border-top: none; }
+  li time { color: var(--muted); font-variant-numeric: tabular-nums; }
+  .empty { color: var(--muted); font-size: 14px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Power map</h1>
+
+  <section class="panel light" id="light">
+    <div class="bulb"></div>
+    <div>
+      <div class="state" id="state">Unknown</div>
+      <div class="detail" id="detail">Press Start to listen</div>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="controls">
+      <button id="start">Start listening</button>
+      <span class="status" id="status">Microphone off</span>
+    </div>
+    <div class="meter alarm"><span id="alarm-label">NEPA alarm</span><div class="track"><div class="fill" id="alarm-fill"></div><div class="mark" id="alarm-mark"></div></div><span class="value" id="alarm-value">–</span></div>
+    <div class="meter gen"><span id="gen-label">Generator</span><div class="track"><div class="fill" id="gen-fill"></div><div class="mark" id="gen-mark"></div></div><span class="value" id="gen-value">–</span></div>
+    <div class="hint">Bars: the newest second's score. Line: the threshold it has to reach.</div>
+  </section>
+
+  <section class="panel">
+    <h2>Events</h2>
+    <ol id="events"><li class="empty">Nothing yet</li></ol>
+  </section>
+</main>
+
+<script>
+const HOP_SECONDS = 0.48;   // the server scores one YAMNet patch per hop
+const $ = (id) => document.getElementById(id);
+const clock = (seconds) => new Date(seconds * 1000).toLocaleTimeString();
+
+// copies every block of microphone samples to the page, outputs nothing so nothing is played
+const TAP = `class Tap extends AudioWorkletProcessor {
+  process(inputs) { if (inputs[0][0]) this.port.postMessage(inputs[0][0].slice(0)); return true; }
+}
+registerProcessor("tap", Tap);`;
+
+let pending = [], pendingLength = 0, queue = Promise.resolve();
+
+$("start").onclick = async () => {
+  $("start").disabled = true;
+  try {
+    // browser clean-up off: noise suppression would take out a generator's steady hum
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false }
+    });
+    // the microphone's own rate, the server resamples to 16kHz
+    const context = new AudioContext();
+    await context.audioWorklet.addModule(URL.createObjectURL(new Blob([TAP], { type: "application/javascript" })));
+    const tap = new AudioWorkletNode(context, "tap");
+    context.createMediaStreamSource(stream).connect(tap);
+    tap.connect(context.destination);   // keeps the tap running, it only outputs silence
+    tap.port.onmessage = (event) => {
+      pending.push(event.data);
+      pendingLength += event.data.length;
+      if (pendingLength >= HOP_SECONDS * context.sampleRate) send(context.sampleRate);
+    };
+    $("start").textContent = "Listening";
+    $("status").textContent = `Microphone on, ${context.sampleRate} Hz`;
+  } catch (error) {
+    $("start").disabled = false;
+    $("status").textContent = `Could not start the microphone: ${error.message}`;
+  }
+};
+
+function send(sampleRate) {
+  const chunk = new Float32Array(pendingLength);
+  let offset = 0;
+  for (const part of pending) { chunk.set(part, offset); offset += part.length; }
+  pending = []; pendingLength = 0;
+  // one request at a time, so the chunks reach the server in order
+  queue = queue
+    .then(() => fetch(`/audio?sr=${sampleRate}`, { method: "POST", body: chunk.buffer }))
+    .then((response) => response.json())
+    .then(render)
+    .catch((error) => { $("status").textContent = `Server not reachable: ${error.message}`; });
+}
+
+function render(reply) {
+  const light = $("light");
+  light.classList.toggle("on", reply.light === true);
+  light.classList.toggle("off", reply.light === false);
+  $("state").textContent = reply.light === true ? "Light on" : reply.light === false ? "No light" : "Unknown";
+  $("detail").textContent = reply.since ? `since ${clock(reply.since)}, ${reply.reason}` : "Listening, nothing heard yet";
+
+  for (const name of ["alarm", "gen"]) {
+    const p = reply.probs ? reply.probs[name] : null;
+    $(`${name}-fill`).style.width = `${(p ?? 0) * 100}%`;
+    $(`${name}-mark`).style.left = `${reply.thresholds[name] * 100}%`;
+    $(`${name}-value`).textContent = p === null ? "–" : p.toFixed(2);
+  }
+  $("alarm-label").classList.toggle("active", reply.alarm_sounding);
+  $("gen-label").classList.toggle("active", reply.generator_running);
+  if (reply.level_db !== null) $("status").textContent = `Microphone on, level ${reply.level_db.toFixed(0)} dB`;
+
+  $("events").innerHTML = reply.events.length
+    ? reply.events.map((e) => `<li><time>${clock(e.time)}</time><span>${e.text}</span></li>`).join("")
+    : `<li class="empty">Nothing yet</li>`;
+}
+</script>
+</body>
+</html>
